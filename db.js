@@ -3,7 +3,8 @@ import sqlite3 from "sqlite3";
 const db = new sqlite3.Database("./queue.db");
 
 const BASE_IMAGE_URL =
-  "https://limo-bacend.onrender.com/images/catalogpics";
+  "https://magenta-cascaron-cdb5f6.netlify.app/catalogpics";
+
 
 db.serialize(() => {
   db.run(`
