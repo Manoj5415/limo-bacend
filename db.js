@@ -2,8 +2,10 @@ import sqlite3 from "sqlite3";
 
 const db = new sqlite3.Database("./queue.db");
 
+const BASE_IMAGE_URL =
+  "https://limo-bacend.onrender.com/images/catalogpics";
+
 db.serialize(() => {
-  // PLACES
   db.run(`
     CREATE TABLE IF NOT EXISTS places (
       id TEXT PRIMARY KEY,
@@ -15,7 +17,6 @@ db.serialize(() => {
     )
   `);
 
-  // APPROVED TOKENS (REAL QUEUE)
   db.run(`
     CREATE TABLE IF NOT EXISTS tokens (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -26,46 +27,38 @@ db.serialize(() => {
     )
   `);
 
-  // 🆕 TOKEN REQUESTS (PENDING / REJECTED)
-  db.run(`
-    CREATE TABLE IF NOT EXISTS token_requests (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      place_id TEXT,
-      status TEXT CHECK(status IN ('pending','approved','rejected')) DEFAULT 'pending',
-      requested_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  // DEV RESET
+  /* CLEAN SEED */
   db.run("DELETE FROM places");
   db.run("DELETE FROM tokens");
-  db.run("DELETE FROM token_requests");
 
   const stmt = db.prepare(`
-    INSERT INTO places (id, name, type, image)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO places (id, name, type, image, currentToken, lastIssuedToken)
+    VALUES (?, ?, ?, ?, 0, 0)
   `);
 
+  /* ---------- HOSPITALS ---------- */
   for (let i = 1; i <= 9; i++) {
     stmt.run(
       `hospital-${i}`,
       `Hospital ${i}`,
       "hospital",
-      `/images/catalogpics/hospitals/hospital${i}.jpg`
+      `${BASE_IMAGE_URL}/hospitals/hospital${i}.jpg`
     );
   }
 
+  /* ---------- HOTELS ---------- */
   for (let i = 1; i <= 9; i++) {
     stmt.run(
       `hotel-${i}`,
       `Hotel ${i}`,
       "hotel",
-      `/images/catalogpics/hotels/hotel${i}.jpg`
+      `${BASE_IMAGE_URL}/hotels/hotel${i}.jpg`
     );
   }
 
   stmt.finalize();
-  console.log("✅ Database initialized with request-based queue model");
+
+  console.log("✅ Database seeded with production image URLs");
 });
 
 export default db;
