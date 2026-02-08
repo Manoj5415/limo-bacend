@@ -1,19 +1,39 @@
 import express from "express";
 import cors from "cors";
+import db from "./db.js";
 import path from "path";
 import { fileURLToPath } from "url";
-import db from "./db.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 
-app.use(cors({ origin: "http://localhost:5173" }));
+/* =======================
+   CORS — FIXED FOR PROD
+======================= */
+app.use(
+  cors({
+    origin: [
+      "http://localhost:5173",
+      "https://magenta-cascaron-cdb5f6.netlify.app",
+    ],
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    credentials: true,
+  })
+);
+
 app.use(express.json());
+
+/* =======================
+   STATIC IMAGES
+======================= */
 app.use("/images", express.static(path.join(__dirname, "images")));
 
+/* =======================
+   HEALTH CHECK
+======================= */
 app.get("/", (req, res) => {
   res.send("Live Queue Backend is running");
 });
@@ -21,42 +41,50 @@ app.get("/", (req, res) => {
 /* =======================
    PLACES
 ======================= */
-
 app.get("/api/places", (req, res) => {
   db.all("SELECT * FROM places", (err, rows) => {
+    if (err) return res.status(500).json({ success: false });
     res.json({ success: true, data: rows });
   });
 });
 
 app.get("/api/places/:id", (req, res) => {
-  db.get("SELECT * FROM places WHERE id = ?", [req.params.id], (err, row) => {
-    res.json({ success: true, data: row });
-  });
+  db.get(
+    "SELECT * FROM places WHERE id = ?",
+    [req.params.id],
+    (err, row) => {
+      if (!row) {
+        return res.status(404).json({
+          success: false,
+          message: "Place not found",
+        });
+      }
+      res.json({ success: true, data: row });
+    }
+  );
 });
 
 /* =======================
-   USER → REQUEST TOKEN
+   REQUEST-BASED QUEUE
 ======================= */
 
+// User requests token
 app.post("/api/places/:id/request", (req, res) => {
   const placeId = req.params.id;
 
   db.run(
-    "INSERT INTO token_requests (place_id) VALUES (?)",
+    "INSERT INTO tokens (place_id, token_number) VALUES (?, NULL)",
     [placeId],
-    () => {
-      res.json({ success: true, message: "Token request submitted" });
+    function () {
+      res.json({ success: true, requestId: this.lastID });
     }
   );
 });
 
-/* =======================
-   ADMIN → VIEW REQUESTS
-======================= */
-
+// Admin fetches requests
 app.get("/api/places/:id/requests", (req, res) => {
   db.all(
-    "SELECT * FROM token_requests WHERE place_id = ? AND status = 'pending'",
+    "SELECT * FROM tokens WHERE place_id = ? AND token_number IS NULL",
     [req.params.id],
     (err, rows) => {
       res.json({ success: true, data: rows });
@@ -64,75 +92,48 @@ app.get("/api/places/:id/requests", (req, res) => {
   );
 });
 
-/* =======================
-   ADMIN → APPROVE REQUEST
-======================= */
-
-app.post("/api/requests/:requestId/approve", (req, res) => {
-  const requestId = req.params.requestId;
+// Admin approves request
+app.post("/api/places/:id/approve", (req, res) => {
+  const { requestId } = req.body;
+  const placeId = req.params.id;
 
   db.get(
-    `
-    SELECT place_id FROM token_requests
-    WHERE id = ? AND status = 'pending'
-    `,
-    [requestId],
-    (err, request) => {
-      if (!request) {
-        return res.status(404).json({ success: false });
-      }
+    "SELECT lastIssuedToken FROM places WHERE id = ?",
+    [placeId],
+    (err, place) => {
+      const newToken = (place.lastIssuedToken || 0) + 1;
 
-      const placeId = request.place_id;
+      db.serialize(() => {
+        db.run(
+          "UPDATE tokens SET token_number = ? WHERE id = ?",
+          [newToken, requestId]
+        );
+        db.run(
+          "UPDATE places SET lastIssuedToken = ? WHERE id = ?",
+          [newToken, placeId]
+        );
+      });
 
-      db.get(
-        "SELECT lastIssuedToken FROM places WHERE id = ?",
-        [placeId],
-        (err, place) => {
-          const newToken = place.lastIssuedToken + 1;
-
-          db.serialize(() => {
-            db.run(
-              "UPDATE places SET lastIssuedToken = ? WHERE id = ?",
-              [newToken, placeId]
-            );
-
-            db.run(
-              "INSERT INTO tokens (place_id, token_number) VALUES (?, ?)",
-              [placeId, newToken]
-            );
-
-            db.run(
-              "UPDATE token_requests SET status = 'approved' WHERE id = ?",
-              [requestId]
-            );
-          });
-
-          res.json({ success: true, token: newToken });
-        }
-      );
+      res.json({ success: true, token: newToken });
     }
   );
 });
 
-/* =======================
-   ADMIN → REJECT REQUEST
-======================= */
+// Admin next token
+app.put("/api/places/:id/next", (req, res) => {
+  const placeId = req.params.id;
 
-app.post("/api/requests/:requestId/reject", (req, res) => {
   db.run(
-    "UPDATE token_requests SET status = 'rejected' WHERE id = ?",
-    [req.params.requestId],
+    "UPDATE places SET currentToken = COALESCE(currentToken, 0) + 1 WHERE id = ?",
+    [placeId],
     () => res.json({ success: true })
   );
 });
 
-/* =======================
-   QUEUE / DISPLAY
-======================= */
-
+// Token history
 app.get("/api/places/:id/tokens", (req, res) => {
   db.all(
-    "SELECT * FROM tokens WHERE place_id = ? ORDER BY token_number",
+    "SELECT * FROM tokens WHERE place_id = ? AND token_number IS NOT NULL",
     [req.params.id],
     (err, rows) => {
       res.json({ success: true, data: rows });
@@ -140,29 +141,9 @@ app.get("/api/places/:id/tokens", (req, res) => {
   );
 });
 
-app.put("/api/places/:id/next", (req, res) => {
-  const placeId = req.params.id;
-
-  db.get(
-    "SELECT currentToken, lastIssuedToken FROM places WHERE id = ?",
-    [placeId],
-    (err, place) => {
-      if (place.currentToken >= place.lastIssuedToken) {
-        return res.status(400).json({ success: false });
-      }
-
-      const next = place.currentToken + 1;
-
-      db.run(
-        "UPDATE places SET currentToken = ? WHERE id = ?",
-        [next, placeId]
-      );
-
-      res.json({ success: true, currentToken: next });
-    }
-  );
-});
-
+/* =======================
+   START SERVER
+======================= */
 app.listen(PORT, () => {
-  console.log(`🚀 Backend running on http://localhost:${PORT}`);
+  console.log(`🚀 Backend running on port ${PORT}`);
 });
